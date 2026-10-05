@@ -22,6 +22,7 @@
 #   NODE_MAJOR    22
 #   SP_GH_PROXY   内地直连 raw.githubusercontent.com 被墙时的 GitHub 镜像，按顺序回退
 #   SKIP_ASSETS   设为 1 时跳过 270 MB 素材下载（磁盘紧张时用；游戏用替代图仍可玩）
+#   SKIP_UPDATE   设为 1 时跳过 git 更新，直接用现有代码部署（github.com 连不上时用）
 #
 # 覆盖示例：
 #   sudo PORT=9000 bash deploy.sh
@@ -46,6 +47,7 @@ SERVICE_NAME="${SERVICE_NAME:-stronghold-protocol}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GH_PROXY_LIST="${SP_GH_PROXY:-https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/}"
 SKIP_ASSETS="${SKIP_ASSETS:-0}"
+SKIP_UPDATE="${SKIP_UPDATE:-0}"
 
 log()  { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[deploy]\033[0m %s\n' "$*" >&2; }
@@ -122,17 +124,44 @@ if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
   die "目录 $APP_DIR 已存在且不是 git 仓库。请先移走它，或改用 APP_DIR=/root/data/disk/apps/<别的名字>。"
 fi
 
-if [ -d "$APP_DIR/.git" ]; then
+# 大陆服务器访问 github.com 经常卡住，所以：只跑 90 秒、失败换镜像、都失败也继续部署
+export GIT_TERMINAL_PROMPT=0
+GIT_NI=(git -c credential.helper= -c core.askPass=)
+
+update_existing_repo() {
+  local origin_url base
+  origin_url="$("${GIT_NI[@]}" -C "$APP_DIR" remote get-url origin 2>/dev/null || true)"
+  [ -n "$origin_url" ] || origin_url="$REPO_URL"
+
+  if timeout 90 "${GIT_NI[@]}" -C "$APP_DIR" fetch --prune --depth 1 origin "$BRANCH"; then
+    log "已从 origin 更新代码。"
+    return 0
+  fi
+  warn "直连 origin 拉取超时/失败，改用 GitHub 镜像重试…"
+  for base in $(printf '%s\n' "$GH_PROXY_LIST" | tr ',' ' '); do
+    if timeout 90 "${GIT_NI[@]}" -C "$APP_DIR" fetch --prune --depth 1 \
+         "${base%/}/${origin_url}" "$BRANCH:refs/remotes/origin/$BRANCH"; then
+      log "已从镜像更新代码：$base"
+      return 0
+    fi
+    warn "镜像失败：$base"
+  done
+  return 1
+}
+
+if [ -d "$APP_DIR/.git" ] && [ "$SKIP_UPDATE" = "1" ]; then
+  log "SKIP_UPDATE=1：跳过代码更新，直接用现有代码部署。"
+elif [ -d "$APP_DIR/.git" ]; then
   log "更新已有仓库 $APP_DIR（分支 $BRANCH）…"
-  git -C "$APP_DIR" fetch --prune origin
-  git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
-  git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+  update_existing_repo || warn "代码更新失败（网络问题），继续用现有代码部署。"
+  "${GIT_NI[@]}" -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH" || warn "checkout 跳过"
+  "${GIT_NI[@]}" -C "$APP_DIR" reset --hard "origin/$BRANCH" || warn "reset 跳过"
 else
   log "克隆 $REPO_URL （分支 $BRANCH）到 $APP_DIR …"
   cloned=0
   for base in "" $(printf '%s\n' "$GH_PROXY_LIST" | tr ',' ' '); do
     url="${base:+${base%/}/}${REPO_URL}"
-    if git clone --branch "$BRANCH" --depth 1 "$url" "$APP_DIR"; then cloned=1; break; fi
+    if timeout 300 "${GIT_NI[@]}" clone --branch "$BRANCH" --depth 1 "$url" "$APP_DIR"; then cloned=1; break; fi
     warn "克隆失败，换下一个源：$url"
     rm -rf "$APP_DIR"
   done
