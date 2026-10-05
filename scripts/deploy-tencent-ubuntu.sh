@@ -1,39 +1,41 @@
 #!/usr/bin/env bash
 # ============================================================================
 # 卫戍协议：盟约 · Stronghold Protocol: Alliance
-# 腾讯云 Ubuntu 一键部署脚本：克隆 → 依赖 → 素材 → systemd 常驻服务
-# Tencent Cloud Ubuntu one-shot deploy: clone → deps → assets → systemd service
+# Ubuntu 一键部署：在 /opt/apps 下克隆 → 安装依赖 → 下载素材 → systemd 常驻服务
+# Ubuntu one-shot deploy: clone into /opt/apps → deps → assets → systemd service
 #
-# 支持系统：Ubuntu 22.04 / 24.04（x86_64 或 arm64 均可）
-# 用法（root 或 sudo）：
-#   sudo bash scripts/deploy-tencent-ubuntu.sh
-#   # 或者先克隆再跑：
-#   git clone <仓库地址> /opt/stronghold-protocol && cd /opt/stronghold-protocol
-#   sudo bash scripts/deploy-tencent-ubuntu.sh
+# 一键用法（腾讯云 Ubuntu 22.04 / 24.04，ubuntu 用户）：
+#   cd /opt/apps
+#   sudo bash deploy.sh                 # 本脚本；默认端口 8083
 #
-# 可用环境变量覆盖默认值：
-#   REPO_URL=https://github.com/Wwhqqqq/StrongholdPrptocol.git
-#   BRANCH=master            APP_DIR=/opt/stronghold-protocol
-#   PORT=3000                SERVICE_NAME=stronghold-protocol
-#   SERVICE_USER=stronghold  NODE_MAJOR=22
-#   SP_GH_PROXY="https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/"
-#     ↑ 内地服务器直连 raw.githubusercontent.com 被墙时的 GitHub 加速镜像（按顺序回退）
+# 默认值（都可以用环境变量覆盖）：
+#   REPO_URL      https://github.com/Wwhqqqq/StrongholdPrptocol.git
+#   BRANCH        master
+#   APP_DIR       /opt/apps/StrongholdPrptocol        ← 克隆到这里
+#   PORT          8083                               ← 记得在腾讯云安全组放行该端口
+#   SERVICE_USER  触发 sudo 的用户（一般是 ubuntu）
+#   NODE_MAJOR    22
+#   SP_GH_PROXY   内地直连 raw.githubusercontent.com 被墙时的 GitHub 镜像，按顺序回退
 #
-# 磁盘/内存参考：主程序 + 依赖 ≈ 90 MB，美术/音频素材 ≈ 270 MB，整机占用 < 1 GB。
-#   系统盘 ≥ 20 GB、内存 ≥ 1 GB（推荐 2 GB）即可；战斗在玩家浏览器里模拟，服务器很轻。
-#   注意：每位玩家首次进入游戏要从服务器下载素材（数十 MB ~ 270 MB，之后走浏览器缓存），
+# 覆盖示例：
+#   sudo PORT=9000 bash deploy.sh
+#   sudo APP_DIR=/opt/apps/game bash deploy.sh
+#   sudo REPO_URL=https://ghfast.top/https://github.com/Wwhqqqq/StrongholdPrptocol.git bash deploy.sh
+#
+# 资源占用：代码 40 MB + 依赖 90 MB + 素材 270 MB，合计 < 1 GB；
+#   内存 1 GB 可跑（推荐 2 GB），1~2 核即可（战斗在玩家浏览器里模拟，服务器很轻）。
+#   注意：每位玩家首次进入游戏要从服务器下载数十 MB 素材（之后走浏览器缓存），
 #   公网带宽 1 Mbps 会非常慢，建议 ≥ 5 Mbps 或按流量计费（素材流量会计费）。
 #
-# 重跑：脚本是幂等的 —— 已存在的仓库会 git pull 更新，素材会续传，服务会重启。
+# 幂等：可重复执行 —— 已存在的仓库会更新，素材会续传，服务会重启。
 # ============================================================================
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Wwhqqqq/StrongholdPrptocol.git}"
 BRANCH="${BRANCH:-master}"
-APP_DIR="${APP_DIR:-/opt/stronghold-protocol}"
-PORT="${PORT:-3000}"
+APP_DIR="${APP_DIR:-/opt/apps/StrongholdPrptocol}"
+PORT="${PORT:-8083}"
 SERVICE_NAME="${SERVICE_NAME:-stronghold-protocol}"
-SERVICE_USER="${SERVICE_USER:-stronghold}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GH_PROXY_LIST="${SP_GH_PROXY:-https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/}"
 
@@ -42,6 +44,17 @@ warn() { printf '\033[33m[deploy]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[deploy] 失败：%s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = "0" ] || die "请用 root 或 sudo 运行：sudo bash $0"
+
+# 运行账号：显式指定 -> 触发 sudo 的用户 -> ubuntu -> 专用系统账号
+if [ -z "${SERVICE_USER:-}" ]; then
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    SERVICE_USER="$SUDO_USER"
+  elif id -u ubuntu >/dev/null 2>&1; then
+    SERVICE_USER="ubuntu"
+  else
+    SERVICE_USER="stronghold"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 1. 基础软件包
@@ -52,7 +65,7 @@ apt-get update -y
 apt-get install -y --no-install-recommends git curl ca-certificates xz-utils sudo
 
 # ---------------------------------------------------------------------------
-# 2. Node.js（≥ 22；已满足则跳过）
+# 2. Node.js ≥ 22（已满足则跳过）
 # ---------------------------------------------------------------------------
 node_ok() {
   command -v node >/dev/null 2>&1 &&
@@ -79,41 +92,53 @@ else
   useradd --system --create-home --home-dir "/var/lib/${SERVICE_USER}" \
     --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$APP_DIR"
 
 # ---------------------------------------------------------------------------
-# 4. 拉取代码（克隆 / 更新）
+# 4. 克隆 / 更新代码到 $APP_DIR
 # ---------------------------------------------------------------------------
+PARENT_DIR="$(dirname "$APP_DIR")"
+install -d "$PARENT_DIR"
+
+if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
+  die "目录 $APP_DIR 已存在且不是 git 仓库。请先移走它，或改用 APP_DIR=/opt/apps/<别的名字>。"
+fi
+
 if [ -d "$APP_DIR/.git" ]; then
-  log "更新已有仓库：git fetch + reset --hard origin/$BRANCH"
+  log "更新已有仓库 $APP_DIR（分支 $BRANCH）…"
   git -C "$APP_DIR" fetch --prune origin
   git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
   git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 else
   log "克隆 $REPO_URL （分支 $BRANCH）到 $APP_DIR …"
-  git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
+  cloned=0
+  for base in "" $(printf '%s\n' "$GH_PROXY_LIST" | tr ',' ' '); do
+    url="${base:+${base%/}/}${REPO_URL}"
+    if git clone --branch "$BRANCH" --depth 1 "$url" "$APP_DIR"; then cloned=1; break; fi
+    warn "克隆失败，换下一个源：$url"
+    rm -rf "$APP_DIR"
+  done
+  [ "$cloned" = 1 ] || die "克隆失败。可试：sudo REPO_URL=<镜像地址> bash $0"
 fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 
-as_user() { sudo -u "$SERVICE_USER" -H bash -lc "cd '$APP_DIR' && $*"; }
+# 以运行账号在项目目录里执行命令
+app_run() { sudo -u "$SERVICE_USER" -H -- bash -lc "cd '$APP_DIR' && $*"; }
 
 # ---------------------------------------------------------------------------
 # 5. 依赖（npm ci；postinstall 会把 pixi / preact / three 复制到 public/vendor）
 # ---------------------------------------------------------------------------
 log "安装 npm 依赖（约 90 MB）…"
-as_user "npm ci --no-audit --no-fund" || as_user "npm install --no-audit --no-fund"
+app_run "npm ci --no-audit --no-fund" || app_run "npm install --no-audit --no-fund"
 
 # ---------------------------------------------------------------------------
 # 6. 美术 / 音频素材（约 270 MB，可中断续传）
-#    内地服务器直连 raw.githubusercontent.com 会被墙，这里先直连、失败自动走 GitHub 镜像。
-#    如果本机已经有一份完整的 public/assets，也可以直接同步过来，跳过这一步：
-#      rsync -az --delete ./public/assets/ root@<服务器>:$APP_DIR/public/assets/
+#    内地服务器直连 raw.githubusercontent.com 会被墙：先直连，失败自动走 GitHub 镜像。
+#    若本机已有一份完整的 public/assets，也可以直接同步过来，跳过这一步：
+#      rsync -az --progress ./public/assets/ ubuntu@111.229.87.157:/opt/apps/StrongholdPrptocol/public/assets/
 # ---------------------------------------------------------------------------
-if [ -f "$APP_DIR/data/assets.json" ] && [ -d "$APP_DIR/public/assets" ]; then
-  log "准备素材下载（直连 GitHub，失败自动回退镜像：$GH_PROXY_LIST）…"
-  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$APP_DIR/.cache"
-  cat > "$APP_DIR/.cache/gh-proxy-preload.mjs" <<'PRELOAD'
-// 直连失败时自动回退到 GitHub 加速镜像（仅用于 raw.githubusercontent.com）。
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$APP_DIR/.cache"
+cat > "$APP_DIR/.cache/gh-proxy-preload.mjs" <<'PRELOAD'
+// 直连失败时自动回退到 GitHub 加速镜像（仅作用于 raw.githubusercontent.com）。
 // 由 scripts/deploy-tencent-ubuntu.sh 生成，位于 .cache/（不纳入版本控制）。
 const PROXIES = (process.env.SP_GH_PROXY ||
   'https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/')
@@ -147,19 +172,18 @@ globalThis.fetch = async function patchedFetch(input, init) {
   throw lastErr || new Error('all sources failed for ' + url);
 };
 PRELOAD
-  chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/.cache/gh-proxy-preload.mjs"
-  # 个别敌方图标上游本身就缺失（客户端会自动回退），因此这里忽略退出码。
-  as_user "SP_GH_PROXY='$GH_PROXY_LIST' node --import ./.cache/gh-proxy-preload.mjs tools/fetch-assets.mjs" || \
-    warn "素材下载未全部完成（多为上游缺文件），可稍后重跑本脚本续传；游戏仍可运行。"
-else
-  warn "未找到 data/assets.json，跳过素材下载。"
-fi
+chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/.cache/gh-proxy-preload.mjs"
+
+log "下载美术 / 音频素材（约 270 MB，可中断后续传）…"
+# 个别敌方图标上游本身就缺失（客户端会自动回退），因此这里忽略退出码。
+app_run "SP_GH_PROXY='$GH_PROXY_LIST' node --import ./.cache/gh-proxy-preload.mjs tools/fetch-assets.mjs" || \
+  warn "素材未全部完成（多为上游缺文件），可重跑本脚本续传；游戏仍可运行，缺的用替代图。"
 
 # ---------------------------------------------------------------------------
 # 7. systemd 常驻服务
 # ---------------------------------------------------------------------------
 NODE_BIN="$(command -v node)"
-log "写入 systemd 单元 /etc/systemd/system/${SERVICE_NAME}.service …"
+log "写入 systemd 单元 /etc/systemd/system/${SERVICE_NAME}.service （端口 ${PORT}）…"
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
 Description=Stronghold Protocol: Alliance (unofficial fan remake)
@@ -191,7 +215,7 @@ systemctl enable --now "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
 # ---------------------------------------------------------------------------
-# 8. 防火墙（ufw 开启时才处理；腾讯云还需要在控制台「安全组」放行端口）
+# 8. 防火墙（ufw 开着才处理；腾讯云还需在控制台「安全组 / 防火墙」放行端口）
 # ---------------------------------------------------------------------------
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
   log "放行 ufw 端口 ${PORT}/tcp …"
@@ -205,29 +229,31 @@ sleep 2
 if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null; then
   log "健康检查通过：http://127.0.0.1:${PORT}/healthz"
 else
-  warn "健康检查未通过，查看日志：journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+  warn "健康检查未通过：journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
 fi
 
 PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 cat <<SUMMARY
 
-================= 部署完成 =================
-目录      : ${APP_DIR}
-服务      : systemctl status ${SERVICE_NAME}
-日志      : journalctl -u ${SERVICE_NAME} -f
+=================== 部署完成 ===================
+代码目录  : ${APP_DIR}
+端口      : ${PORT}
+运行账号  : ${SERVICE_USER}
+服务状态  : systemctl status ${SERVICE_NAME}
+实时日志  : journalctl -u ${SERVICE_NAME} -f
 本机访问  : http://127.0.0.1:${PORT}
 公网访问  : http://${PUBLIC_IP:-<服务器公网IP>}:${PORT}
-玩家入口  : 把上面的公网地址发给朋友，创建「同盟模拟」房间后分享 4 位同盟密钥
-资源占用  : 磁盘 < 1 GB（代码 30 MB + 依赖 90 MB + 素材 270 MB）；内存空闲约 100 MB
+健康检查  : http://${PUBLIC_IP:-<服务器公网IP>}:${PORT}/healthz
+玩家入口  : 打开上面的公网地址 → 输入昵称 → 同盟模拟 → 创建房间，把 4 位同盟密钥发给朋友
+资源占用  : 磁盘 < 1 GB（代码 40 MB + 依赖 90 MB + 素材 270 MB）；内存空闲约 100 MB
 
-还要做两件事玩家才能连进来：
-  1. 腾讯云控制台 → 该实例「安全组」→ 放行 TCP ${PORT}（生产环境建议只放行 80/443，用 Nginx 反代）
-  2. 用 Nginx + HTTPS 反代时记得转发 WebSocket（路径 /ws）：
-     proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade";
+❗ 还需要在腾讯云控制台放行端口，否则外网打不开：
+   实例 → 安全组（轻量服务器是「防火墙」）→ 添加入站规则 → TCP ${PORT} → 允许 0.0.0.0/0
 
 常用命令：
-  更新到最新代码 : REPO_URL=... sudo bash ${APP_DIR}/scripts/deploy-tencent-ubuntu.sh
-  重启 / 停止    : systemctl restart|stop ${SERVICE_NAME}
-  换端口         : sudo PORT=8080 bash ${APP_DIR}/scripts/deploy-tencent-ubuntu.sh
-===========================================
+  更新代码 : cd /opt/apps && sudo bash deploy.sh
+  改端口   : sudo PORT=9000 bash deploy.sh
+  重启/停止: systemctl restart|stop ${SERVICE_NAME}
+  反代(可选): Nginx 转发到 127.0.0.1:${PORT}，记得转发 WebSocket（路径 /ws）
+===============================================
 SUMMARY
