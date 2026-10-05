@@ -153,7 +153,13 @@ app_run() { sudo -u "$SERVICE_USER" -H -- bash -lc "cd '$APP_DIR' && $*"; }
 # 5. 依赖（npm ci；postinstall 会把 pixi / preact / three 复制到 public/vendor）
 # ---------------------------------------------------------------------------
 log "安装 npm 依赖（约 90 MB）…"
-app_run "npm ci --no-audit --no-fund" || app_run "npm install --no-audit --no-fund"
+# npm 缓存放在项目内，避免 ~/.npm 里残留的 root 属主文件导致 EACCES
+NPM_CACHE="$APP_DIR/.cache/npm"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$NPM_CACHE"
+if ! app_run "npm ci --no-audit --no-fund --cache $NPM_CACHE"; then
+  warn "npm ci 失败（常见原因：上次装到一半、磁盘曾经满过），清掉 node_modules 后用 npm install 重试…"
+  app_run "rm -rf node_modules && npm install --no-audit --no-fund --cache $NPM_CACHE"
+fi
 
 # ---------------------------------------------------------------------------
 # 6. 美术 / 音频素材（约 270 MB，可中断续传）
