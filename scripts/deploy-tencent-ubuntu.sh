@@ -16,6 +16,7 @@
 #   SERVICE_USER  触发 sudo 的用户（一般是 ubuntu）
 #   NODE_MAJOR    22
 #   SP_GH_PROXY   内地直连 raw.githubusercontent.com 被墙时的 GitHub 镜像，按顺序回退
+#   SKIP_ASSETS   设为 1 时跳过 270 MB 素材下载（磁盘紧张时用；游戏用替代图仍可玩）
 #
 # 覆盖示例：
 #   sudo PORT=9000 bash deploy.sh
@@ -38,6 +39,7 @@ PORT="${PORT:-8083}"
 SERVICE_NAME="${SERVICE_NAME:-stronghold-protocol}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GH_PROXY_LIST="${SP_GH_PROXY:-https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/}"
+SKIP_ASSETS="${SKIP_ASSETS:-0}"
 
 log()  { printf '\033[36m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[deploy]\033[0m %s\n' "$*" >&2; }
@@ -98,6 +100,17 @@ fi
 # ---------------------------------------------------------------------------
 PARENT_DIR="$(dirname "$APP_DIR")"
 install -d "$PARENT_DIR"
+
+# 磁盘预检：代码 + 依赖约 150 MB；素材另需约 300 MB（含解压/临时文件留余量）
+if [ "$SKIP_ASSETS" = "1" ]; then NEED_MB=800; else NEED_MB=1600; fi
+FREE_MB="$(df -Pk "$PARENT_DIR" | awk 'NR==2 {print int($4/1024)}')"
+if [ -n "$FREE_MB" ] && [ "$FREE_MB" -lt "$NEED_MB" ]; then
+  die "磁盘空间不足：$PARENT_DIR 所在分区只剩 ${FREE_MB} MB，本次部署需要约 ${NEED_MB} MB。
+  处理办法（任选）：
+   1) 清理空间：sudo apt-get clean && sudo journalctl --vacuum-size=200M；再看看 df -h / df -i
+   2) 扩容云硬盘：控制台扩容后执行 sudo growpart /dev/vda 1 && sudo resize2fs /dev/vda1
+   3) 先跳过素材（约省 270 MB，游戏用替代图仍可玩）：sudo SKIP_ASSETS=1 bash $0"
+fi
 
 if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
   die "目录 $APP_DIR 已存在且不是 git 仓库。请先移走它，或改用 APP_DIR=/opt/apps/<别的名字>。"
@@ -174,10 +187,14 @@ globalThis.fetch = async function patchedFetch(input, init) {
 PRELOAD
 chown "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/.cache/gh-proxy-preload.mjs"
 
-log "下载美术 / 音频素材（约 270 MB，可中断后续传）…"
-# 个别敌方图标上游本身就缺失（客户端会自动回退），因此这里忽略退出码。
-app_run "SP_GH_PROXY='$GH_PROXY_LIST' node --import ./.cache/gh-proxy-preload.mjs tools/fetch-assets.mjs" || \
-  warn "素材未全部完成（多为上游缺文件），可重跑本脚本续传；游戏仍可运行，缺的用替代图。"
+if [ "$SKIP_ASSETS" = "1" ]; then
+  warn "SKIP_ASSETS=1：已跳过素材下载（约 270 MB）。客户端会使用替代图 / 静音，之后随时可以不带这个参数重跑本脚本补全。"
+else
+  log "下载美术 / 音频素材（约 270 MB，可中断后续传）…"
+  # 个别敌方图标上游本身就缺失（客户端会自动回退），因此这里忽略退出码。
+  app_run "SP_GH_PROXY='$GH_PROXY_LIST' node --import ./.cache/gh-proxy-preload.mjs tools/fetch-assets.mjs" || \
+    warn "素材未全部完成（多为上游缺文件），可重跑本脚本续传；游戏仍可运行，缺的用替代图。"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. systemd 常驻服务
