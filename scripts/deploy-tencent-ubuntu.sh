@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # ============================================================================
 # 卫戍协议：盟约 · Stronghold Protocol: Alliance
-# Ubuntu 一键部署：在 /opt/apps 下克隆 → 安装依赖 → 下载素材 → systemd 常驻服务
-# Ubuntu one-shot deploy: clone into /opt/apps → deps → assets → systemd service
+# Ubuntu 一键部署：在 /root/data/disk/apps 下克隆 → 依赖 → 素材 → systemd 常驻服务
+# Ubuntu one-shot deploy: clone into /root/data/disk/apps → deps → assets → systemd
 #
 # 一键用法（腾讯云 Ubuntu 22.04 / 24.04，ubuntu 用户）：
-#   cd /opt/apps
-#   sudo bash deploy.sh                 # 本脚本；默认端口 8083
+#   方式一（脚本自己克隆，最省事）：把本脚本保存成 /root/data/disk/deploy.sh，然后
+#     sudo bash /root/data/disk/deploy.sh
+#   方式二（先克隆再跑仓库里的脚本）：
+#     cd /root/data/disk && sudo mkdir -p apps && sudo chown "$USER":"$USER" apps
+#     cd apps && git clone https://github.com/Wwhqqqq/StrongholdPrptocol.git
+#     sudo bash StrongholdPrptocol/scripts/deploy-tencent-ubuntu.sh
 #
 # 默认值（都可以用环境变量覆盖）：
 #   REPO_URL      https://github.com/Wwhqqqq/StrongholdPrptocol.git
 #   BRANCH        master
-#   APP_DIR       /opt/apps/StrongholdPrptocol        ← 克隆到这里
+#   APP_DIR       /root/data/disk/apps/StrongholdPrptocol   ← 克隆/部署到这里
 #   PORT          8083                               ← 记得在腾讯云安全组放行该端口
 #   SERVICE_USER  触发 sudo 的用户（一般是 ubuntu）
 #   NODE_MAJOR    22
@@ -20,7 +24,7 @@
 #
 # 覆盖示例：
 #   sudo PORT=9000 bash deploy.sh
-#   sudo APP_DIR=/opt/apps/game bash deploy.sh
+#   sudo APP_DIR=/root/data/disk/apps/game bash deploy.sh
 #   sudo REPO_URL=https://ghfast.top/https://github.com/Wwhqqqq/StrongholdPrptocol.git bash deploy.sh
 #
 # 资源占用：代码 40 MB + 依赖 90 MB + 素材 270 MB，合计 < 1 GB；
@@ -34,7 +38,7 @@ set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Wwhqqqq/StrongholdPrptocol.git}"
 BRANCH="${BRANCH:-master}"
-APP_DIR="${APP_DIR:-/opt/apps/StrongholdPrptocol}"
+APP_DIR="${APP_DIR:-/root/data/disk/apps/StrongholdPrptocol}"
 PORT="${PORT:-8083}"
 SERVICE_NAME="${SERVICE_NAME:-stronghold-protocol}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
@@ -113,7 +117,7 @@ if [ -n "$FREE_MB" ] && [ "$FREE_MB" -lt "$NEED_MB" ]; then
 fi
 
 if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
-  die "目录 $APP_DIR 已存在且不是 git 仓库。请先移走它，或改用 APP_DIR=/opt/apps/<别的名字>。"
+  die "目录 $APP_DIR 已存在且不是 git 仓库。请先移走它，或改用 APP_DIR=/root/data/disk/apps/<别的名字>。"
 fi
 
 if [ -d "$APP_DIR/.git" ]; then
@@ -134,6 +138,12 @@ else
 fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 
+# /root 下的路径默认只有 root 能进入：如果运行账号进不去，就退回用 root 跑服务
+if ! sudo -u "$SERVICE_USER" -H -- bash -c "cd '$APP_DIR' && touch .perm-check && rm -f .perm-check" 2>/dev/null; then
+  warn "运行账号 $SERVICE_USER 无法访问 $APP_DIR（常见于 /root 是 700 权限），服务改用 root 运行。"
+  SERVICE_USER="root"
+fi
+
 # 以运行账号在项目目录里执行命令
 app_run() { sudo -u "$SERVICE_USER" -H -- bash -lc "cd '$APP_DIR' && $*"; }
 
@@ -147,7 +157,7 @@ app_run "npm ci --no-audit --no-fund" || app_run "npm install --no-audit --no-fu
 # 6. 美术 / 音频素材（约 270 MB，可中断续传）
 #    内地服务器直连 raw.githubusercontent.com 会被墙：先直连，失败自动走 GitHub 镜像。
 #    若本机已有一份完整的 public/assets，也可以直接同步过来，跳过这一步：
-#      rsync -az --progress ./public/assets/ ubuntu@111.229.87.157:/opt/apps/StrongholdPrptocol/public/assets/
+#      rsync -az --progress ./public/assets/ ubuntu@111.229.87.157:/root/data/disk/apps/StrongholdPrptocol/public/assets/
 # ---------------------------------------------------------------------------
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$APP_DIR/.cache"
 cat > "$APP_DIR/.cache/gh-proxy-preload.mjs" <<'PRELOAD'
@@ -268,7 +278,7 @@ cat <<SUMMARY
    实例 → 安全组（轻量服务器是「防火墙」）→ 添加入站规则 → TCP ${PORT} → 允许 0.0.0.0/0
 
 常用命令：
-  更新代码 : cd /opt/apps && sudo bash deploy.sh
+  更新代码 : sudo bash ${APP_DIR}/scripts/deploy-tencent-ubuntu.sh
   改端口   : sudo PORT=9000 bash deploy.sh
   重启/停止: systemctl restart|stop ${SERVICE_NAME}
   反代(可选): Nginx 转发到 127.0.0.1:${PORT}，记得转发 WebSocket（路径 /ws）
