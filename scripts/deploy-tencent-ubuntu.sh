@@ -17,6 +17,7 @@
 #   BRANCH        master
 #   APP_DIR       /root/data/disk/apps/StrongholdPrptocol   ← 克隆/部署到这里
 #   PORT          8083                               ← 记得在腾讯云安全组放行该端口
+#   HOST          0.0.0.0（配了 Nginx HTTPS 反代后建议改成 127.0.0.1，不再对外暴露端口）
 #   SERVICE_USER  触发 sudo 的用户（一般是 ubuntu）
 #   NODE_MAJOR    22
 #   SP_GH_PROXY   内地直连 raw.githubusercontent.com 被墙时的 GitHub 镜像，按顺序回退
@@ -40,6 +41,7 @@ REPO_URL="${REPO_URL:-https://github.com/Wwhqqqq/StrongholdPrptocol.git}"
 BRANCH="${BRANCH:-master}"
 APP_DIR="${APP_DIR:-/root/data/disk/apps/StrongholdPrptocol}"
 PORT="${PORT:-8083}"
+HOST_BIND="${HOST:-0.0.0.0}"
 SERVICE_NAME="${SERVICE_NAME:-stronghold-protocol}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GH_PROXY_LIST="${SP_GH_PROXY:-https://ghfast.top/,https://gh-proxy.com/,https://ghproxy.net/}"
@@ -225,7 +227,7 @@ Group=${SERVICE_USER}
 WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=${PORT}
-Environment=HOST=0.0.0.0
+Environment=HOST=${HOST_BIND}
 Environment=SP_NO_BROWSER=1
 ExecStart=${NODE_BIN} server/index.js
 Restart=always
